@@ -1,5 +1,5 @@
 # ssdc
-Cluster Analysis for Malware Sample Files
+Cluster Analysis for Malware Files
 
 Inspired by https://github.com/bwall/ssdc
 
