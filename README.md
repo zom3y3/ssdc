@@ -1,7 +1,7 @@
 # ssdc
 cluster analysis for malware sample files
 
-#Usage
+# Usage
 usage: ssdc.py [-h] [-s SCORE] [-t TYPE] [-g] [-d] [-e EXCLUDE] [-j JSONFILE]
               FILEPATH
 
