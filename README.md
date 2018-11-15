@@ -1,7 +1,9 @@
 # ssdc
-cluster analysis for malware sample files
+Cluster Analysis for Malware Sample Files
+Inspired by https://github.com/bwall/ssdc
 
 # Usage
+```
 usage: ssdc.py [-h] [-s SCORE] [-t TYPE] [-g] [-d] [-e EXCLUDE] [-j JSONFILE]
               FILEPATH
 
@@ -26,3 +28,4 @@ optional arguments:
                        Save cluster json report to this file (default: None)
 
 Mail bug reports and suggestions to <zom3y3@gmail.com>
+```
