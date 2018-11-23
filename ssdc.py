@@ -58,6 +58,7 @@ class SSDC():
         self.count = 0
         self.cluster_type = type
         self.cluster_report = {}
+        self.del_num = 0
 
     def gen_ssdeep_hash(self, filepath, exclude=False):
         files = os.listdir(filepath)
@@ -247,6 +248,7 @@ class SSDC():
                 for i in range(1, len(tmp_filepaths)):
                     if os.path.exists(tmp_filepaths[i]):
                         os.remove(tmp_filepaths[i])
+                        self.del_num += 1
 
     def delete_exclude(self):
         #delete exclude similar files
@@ -286,6 +288,7 @@ class SSDC():
         for i in range(len(tmp_filepaths)):
             if os.path.exists(tmp_filepaths[i]):
                 os.remove(tmp_filepaths[i])
+                self.del_num += 1
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, epilog='Mail bug reports and suggestions to <zom3y3@gmail.com>')
@@ -294,7 +297,7 @@ if __name__ == "__main__":
     parser.add_argument(dest='filepath', metavar='FILEPATH', help='Specific the File Directory')
     parser.add_argument('-s', '--score', dest='score', metavar='SCORE', choices=similar_scores, help='Specific the similarity score, list of choices: {%(choices)s}', default='60')
     parser.add_argument('-t', '--type', dest='type', metavar='TYPE', choices=cluster_types, help='Specific the cluster type, list of choices: {%(choices)s}', default='file_ssdeep')
-    parser.add_argument('-g', '--gather', dest='gather', action='store_true', help='Put the similar files together to a new file directory')
+    parser.add_argument('-g', '--gather', dest='gather', action='store_true', help='Copy the similar files together to a new file directory')
     parser.add_argument('-d', '--delete', dest='delete', action='store_true', help='Delete the similar files')
     parser.add_argument('-e', '--exclude', dest='exclude', help='Exclude similar files in this file Directory')
     parser.add_argument('-j', '--jsonfile', dest='jsonfile', help='Save cluster json report to this file')
@@ -306,7 +309,7 @@ if __name__ == "__main__":
     if args.score:
         score = int(args.score)
     else:
-        score = 90
+        score = 60
 
     if args.type:
         cluetr_type = args.type
@@ -321,6 +324,7 @@ if __name__ == "__main__":
     if args.delete and args.gather:
         print "[+] WARNING: args.delete dosen't work when args.gather is on. "
     starttime = time.time()
+    print '> Total files num: %d' %(len(os.listdir(analysis_path)))
     print '> Clustering ...'
     s = SSDC(analysis_path, score, type=cluetr_type, exclude_files=exclude)
     s.handle()
@@ -328,25 +332,26 @@ if __name__ == "__main__":
     print '> {0} ssdeep hashes cluster into {1} groups'.format(len(s.hashes), len(s.groups))
 
     if args.gather:
+        timestr = str(int(time.time()))
         for cluster in cluster_report['result']:
             for cluster_name, cluster_data in cluster.items():
                 for ssdeep_hash, ssdeep_files in cluster_data.items():
                     for ssdeep_file in ssdeep_files:
                         filedir = '/'.join(ssdeep_file['file_path'].split('/')[0:-1])
                         filename = ssdeep_file['file_path'].split('/')[-1]
-                        dst_path = os.path.join(filedir, '%s/%s' % (cluster_report['type'], cluster_name))
+                        dst_path = os.path.join(filedir, '%s_%s/%s' % (cluster_report['type'], timestr, cluster_name))
                         dst_file = os.path.join(dst_path, filename)
                         if not os.path.exists(dst_path):
                             os.makedirs(dst_path)
                         shutil.copy(ssdeep_file['file_path'], dst_file)
 
-        print '> Put the similar files together to %s' %(dst_path)
+        print '> Copy the similar files together to %s' %(os.path.join(filedir, '%s_%s/' % (cluster_report['type'], timestr)))
 
     if args.delete and not args.gather:
-        print '> Delete the similar files'
         if args.exclude:
             s.delete_exclude()
         s.delete_similars()
+        print '> Deleted %d similar files, remaining files num: %d' % (s.del_num, len(os.listdir(analysis_path)))
 
     if args.jsonfile:
         jsonfile = args.jsonfile
