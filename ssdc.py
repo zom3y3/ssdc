@@ -3,7 +3,6 @@
 # Github/Twitter: @zom3y3
 # Email: zom3y3@gmail.com
 # Inspired by https://github.com/bwall/ssdc
-
 import os
 import json
 import base64
@@ -12,9 +11,46 @@ import shutil
 import ssdeep
 import time
 import argparse
+import types
 import lief
 from struct import unpack
 from glob import iglob
+import subprocess
+import re
+import requests
+from elftools.common.py3compat import (ifilter, byte2int, bytes2str, itervalues, str2bytes)
+from elftools.elf.elffile import ELFFile
+
+requests.packages.urllib3.disable_warnings()
+
+
+def get_section_ssdeep(file):
+    section_hash_result = {}
+    try:
+        elffile = ELFFile(file)
+        file.seek(0)
+        elfdata = file.read()
+        for nsec, section in enumerate(elffile.iter_sections()):
+            section_data = elfdata[int(section['sh_offset']):int(section['sh_offset']) + int(section['sh_size'])]
+            section_hash_result[bytes2str(section.name)] = ssdeep.hash(section_data)
+    except Exception as e:
+        print str(e)
+        pass
+    return section_hash_result
+
+def get_section_data(file):
+    section_hash_result = {}
+    try:
+        elffile = ELFFile(file)
+        file.seek(0)
+        elfdata = file.read()
+        for nsec, section in enumerate(elffile.iter_sections()):
+            section_data = elfdata[int(section['sh_offset']):int(section['sh_offset']) + int(section['sh_size'])]
+            section_hash_result[bytes2str(section.name)] = section_data
+    except Exception as e:
+        print str(e)
+        pass
+    return section_hash_result
 
 def file_md5(file):
     if os.path.exists(file):
@@ -24,6 +60,19 @@ def file_md5(file):
         f.close()
         return md5
 
+def str_md5(str):
+    try:
+        if type(str) is types.StringType:
+            m = hashlib.md5()
+            m.update(str)
+            return m.hexdigest()
+        else:
+            print type(str)
+            return ''
+    except Exception as e:
+        return ''
+
+#only works for ELF
 def imp_exp_functions(filepath):
     try:
         imp_functions = lief.parse(filepath).imported_functions
@@ -41,8 +90,144 @@ def imp_exp_functions(filepath):
 
     return imp_exp_function_str
 
+def eset_scan(filepath):
+    scan_json = {}
+    scan_json['threats'] = []
+    eset_cmd = "/opt/eset/esets/sbin/esets_scan --no-sfx --adware --unsafe --unwanted --no-mail --no-mailbox --clean-mode=none %s" %(filepath)
+    process = subprocess.Popen(eset_cmd.split(), stdout=subprocess.PIPE)
+    eset_result = process.stdout.read()
+    process.stdout.close()
+    version_regex = r'Module scanner, version ([^\n]*), build ([^\n]*)'
+    version_match = re.search(version_regex, eset_result)
+    if version_match:
+        scan_json['database_version'] = version_match.group(1)
+        scan_json['build_version'] = version_match.group(2)
+
+    threat_regex = r'name="([^\n]*)", threat="([^\n]*)", action="([^\n]*)", info="([^\n]*)"'
+    threat_match = re.finditer(threat_regex, eset_result)
+    for threatmatch in threat_match:
+        tmp_threat_result = {}
+        tmp_threat_result['filename'] = threatmatch.group(1)
+        tmp_threat_result['name'] = ' '.join(threatmatch.group(2).split(' ')[:-1]).replace(' potentially unwanted', '').replace(' potentially unsafe', '').replace('probably ', '')
+        tmp_threat_result['type'] = threatmatch.group(2).split(' ')[-1]
+        tmp_threat_result['action'] = threatmatch.group(3)
+        tmp_threat_result['info'] = threatmatch.group(4)
+        try:
+            # tmp_threat_result['tag'] = '.'.join(tmp_threat_result['name'].replace('a variant of ', '').split('/')[1].split('.')[:-1])
+            tmp_threat_result['tag'] = '.'.join(tmp_threat_result['name'].replace('a variant of ', '').split('/')[1].split('.'))
+        except Exception as e:
+            tmp_threat_result['tag'] = ''
+
+        scan_json['threats'].append(tmp_threat_result)
+
+    return scan_json
+
+def eset_tag(filepath):
+    for threat_result in scan_json['threats']:
+        if os.path.abspath(threat_result['filename']) == os.path.abspath(filepath):
+            return threat_result['tag']
+
+def force_directed_graph(cluster_report, username, password):
+    # force directed graph
+    cluster_directed = {}
+    cluster_directed['nodes'] = []
+    cluster_directed['links'] = []
+    cluster_directed['tags'] = []
+    cluster_id = -1
+    for cluster_data in cluster_report['result']:
+        cluster_id += 1
+        for cluster_name, ssdeep_data in cluster_data.items():
+            cluster_nodes = {}
+            cluster_nodes['id'] = cluster_name
+            cluster_nodes['group'] = cluster_id
+            cluster_directed['nodes'].append(cluster_nodes)
+            for ssdeep_name, md5_data in ssdeep_data.items():
+                nodes_match = False
+                for tmp_nodes in cluster_directed['nodes']:
+                    # can't understand it
+                    # if tmp_nodes['id'] == ssdeep_name and tmp_nodes['group'] == cluster_id:
+                    if tmp_nodes['id'] == ssdeep_name:
+                        nodes_match = True
+                        break
+                if not nodes_match:
+                    ssdeep_nodes = {}
+                    ssdeep_nodes['id'] = ssdeep_name
+                    ssdeep_nodes['group'] = cluster_id
+                    cluster_directed['nodes'].append(ssdeep_nodes)
+
+                links_match = False
+                for tmp_links in cluster_directed['links']:
+                    if tmp_links['source'] == ssdeep_name and tmp_links['target'] == cluster_name:
+                        links_match = True
+                        break
+                if not links_match:
+                    ssdeep_links = {}
+                    ssdeep_links['source'] = ssdeep_name
+                    ssdeep_links['target'] = cluster_name
+                    cluster_directed['links'].append(ssdeep_links)
+
+                for md5_dict in md5_data:
+                    nodes_match = False
+                    for tmp_nodes in cluster_directed['nodes']:
+                        # can't understand it
+                        # if tmp_nodes['id'] == md5_dict['file_md5'] and tmp_nodes['group'] == cluster_id:
+                        if tmp_nodes['id'] == str(os.path.basename(md5_dict['file_path'])):
+                            nodes_match = True
+                            break
+                    if not nodes_match:
+                        md5_nodes = {}
+                        md5_nodes['id'] = str(os.path.basename(md5_dict['file_path']))
+                        md5_nodes['group'] = cluster_id
+                        cluster_directed['nodes'].append(md5_nodes)
+
+                    links_match = False
+                    for tmp_links in cluster_directed['links']:
+                        if tmp_links['source'] == str(os.path.basename(md5_dict['file_path'])) and tmp_links['target'] == ssdeep_name:
+                            links_match = True
+                            break
+                    if not links_match:
+                        md5_links = {}
+                        md5_links['source'] = str(os.path.basename(md5_dict['file_path']))
+                        md5_links['target'] = ssdeep_name
+                        cluster_directed['links'].append(md5_links)
+
+                    tag_match = False
+                    for md5_tag in cluster_directed['tags']:
+                        if md5_tag['md5'] == md5_dict['file_md5'] and md5_tag['filename'] == str(os.path.basename(md5_dict['file_path'])):
+                            tag_match = True
+                            break
+                    if not tag_match:
+                        tag_dict = {}
+                        tag_dict['md5'] = md5_dict['file_md5']
+                        tag_dict['filename'] = str(os.path.basename(md5_dict['file_path']))
+                        tag_dict['tag'] = md5_dict['tag']
+                        cluster_directed['tags'].append(tag_dict)
+
+    base64_data = base64.b64encode(json.dumps(cluster_directed))
+    session = str_md5(str(time.time()))
+    post_data = {
+        "session": session,
+        "base64_data": base64_data,
+        "type": "set"
+    }
+    # print post_data
+    http_headers = {'Content-Type': 'application/json; charset=utf-8', 'User-Agent': 'FINDMALWARE.ORG'}
+    cache_url = "http://192.168.40.156:8081/graph/data/cache_data.php"
+    r = requests.post(cache_url, json=post_data, auth=(username, password), headers=http_headers, timeout=30, verify=False)
+    if r.status_code == requests.codes.ok:
+        # print r.text
+        # return session
+        j = json.loads(r.text)
+        if j['state'] == 'success':
+            return session
+        else:
+            # print r.text
+            return None
+    else:
+        return None
+
 class SSDC():
-    def __init__(self, filepath, score, type='file_ssdeep', exclude_files=''):
+    def __init__(self, filepath, score, type='file_ssdeep', exclude_files=None):
         self.similar_score = score
         self.hashes = {}
         self.sha256s = {}
@@ -52,13 +237,13 @@ class SSDC():
         self.groups = []
         self.file_lists = []
         self.ssdeep_stats = {}
-        self.tmpdir = os.getcwd() + os.sep + str(time.time()) + os.sep
         self.filepath = filepath
         self.exclude_files = exclude_files
         self.count = 0
         self.cluster_type = type
         self.cluster_report = {}
         self.del_num = 0
+        self.ssdeep_sets = set()
 
     def gen_ssdeep_hash(self, filepath, exclude=False):
         files = os.listdir(filepath)
@@ -69,8 +254,8 @@ class SSDC():
             tmp_ssdeep_hash = ''
             if self.cluster_type == 'strings_ssdeep':
                 data = os.popen('strings %s' % (filepath + file)).read()
-
                 tmp_ssdeep_hash = ssdeep.hash(data)
+
             elif self.cluster_type == 'file_ssdeep':
                 tmp_ssdeep_hash = ssdeep.hash_from_file(filepath + file)
 
@@ -79,49 +264,62 @@ class SSDC():
                 if imp_exp_str:
                     tmp_ssdeep_hash = ssdeep.hash(imp_exp_str)
 
+            elif self.cluster_type == 'code_section_ssdeep':
+                section_hash_result = {}
+                with open(filepath + file, 'rb') as file1:
+                    section_hash_result = get_section_ssdeep(file1)
+                if section_hash_result.has_key('.text'):
+                    tmp_ssdeep_hash = section_hash_result['.text']
+
+            elif self.cluster_type == 'rodata_section_ssdeep':
+                section_hash_result = {}
+                with open(filepath + file, 'rb') as file1:
+                    section_hash_result = get_section_ssdeep(file1)
+                if section_hash_result.has_key('.rodata'):
+                    tmp_ssdeep_hash = section_hash_result['.rodata']
+                if not tmp_ssdeep_hash:
+                    data = os.popen('strings %s' % (filepath + file)).read()
+                    tmp_ssdeep_hash = ssdeep.hash(data)
+
+            elif self.cluster_type == 'section_ssdeep':
+                section_hash_result = {}
+                with open(filepath + file, 'rb') as file1:
+                    section_data_result = get_section_data(file1)
+
+                if section_data_result.has_key('.text') and section_data_result.has_key('.rodata'):
+                    tmp_ssdeep_hash = ssdeep.hash(section_data_result['.text'] + section_data_result['.rodata'])
+                if not tmp_ssdeep_hash:
+                    tmp_ssdeep_hash = ssdeep.hash_from_file(filepath + file)
+
+            if not tmp_ssdeep_hash:
+                tmp_ssdeep_hash = ssdeep.hash_from_file(filepath + file)
+
             if tmp_ssdeep_hash:
-                dst_file = self.tmpdir + str(self.count)
-                f = open(dst_file, 'w')
-                f.write(tmp_ssdeep_hash)
-                f.close()
+                self.ssdeep_sets.add(tmp_ssdeep_hash)
                 self.count += 1
                 if tmp_ssdeep_hash not in self.ssdeep_stats.keys():
                     self.ssdeep_stats[tmp_ssdeep_hash] = []
                 tmp_file_ssdeep = {}
                 tmp_file_ssdeep['file_path'] = filepath + file
                 tmp_file_ssdeep['file_md5'] = file_md5(filepath + file)
+                tmp_file_ssdeep['tag'] = eset_tag(filepath + file)
                 tmp_file_ssdeep['cluster_type'] = self.cluster_type
                 tmp_file_ssdeep['exclude'] = 1 if exclude else 0
                 self.ssdeep_stats[tmp_ssdeep_hash].append(tmp_file_ssdeep)
 
     def cluster_start(self):
-        if not os.path.exists(self.tmpdir):
-            os.makedirs(self.tmpdir)
-
         self.gen_ssdeep_hash(self.filepath, exclude=False)
 
         if self.exclude_files:
             self.gen_ssdeep_hash(self.exclude_files, exclude=True)
 
-        self.file_lists = self.enumerate_paths(self.tmpdir.split())
 
     def cluster_finish(self):
-        if os.path.exists(self.tmpdir):
-            shutil.rmtree(self.tmpdir)
         self.gen_cluster_report()
 
     def handle(self):
         self.cluster_start()
-        # parepare ssdeep_lists
-        ssdeep_sets = set()
-        for path in self.file_lists:
-            with open(path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if len(line) == 0:
-                        continue
-                    ssdeep_sets.add(line)
-        ssdeep_lists = list(ssdeep_sets)
+        ssdeep_lists = list(self.ssdeep_sets)
 
         # print '> ssdeep cluster'
         for path in ssdeep_lists:
@@ -188,6 +386,7 @@ class SSDC():
                     tmp_file = {}
                     tmp_file['file_path'] = file_ssdeep['file_path']
                     tmp_file['file_md5'] = file_ssdeep['file_md5']
+                    tmp_file['tag'] = file_ssdeep['tag']
                     tmp_ssdeep_group[group_name][ssdeep_hash].append(tmp_file)
 
 
@@ -236,7 +435,7 @@ class SSDC():
                         path_list.append(p)
         return ret_paths
 
-    def delete_similars(self):
+    def delete_similars(self, exclude_path=None):
         #delete similar files
         for group in xrange(len(self.groups)):
             if (len(self.groups[group])) > 1:
@@ -247,8 +446,11 @@ class SSDC():
                 tmp_filepaths = list(set(tmp_filepaths))
                 for i in range(1, len(tmp_filepaths)):
                     if os.path.exists(tmp_filepaths[i]):
-                        os.remove(tmp_filepaths[i])
-                        self.del_num += 1
+                        if exclude_path and exclude_path in tmp_filepaths[i]:
+                            pass
+                        else:
+                            os.remove(tmp_filepaths[i])
+                            self.del_num += 1
 
     def delete_exclude(self):
         #delete exclude similar files
@@ -282,6 +484,12 @@ class SSDC():
                     for file_ssdeep in v:
                         if not file_ssdeep['exclude']:
                             tmp_filepaths.append(file_ssdeep['file_path'])
+                if flag1 and not flag2:
+                    count = 0
+                    for file_ssdeep in v:
+                        count += 1
+                        if count >1:
+                            tmp_filepaths.append(file_ssdeep['file_path'])
 
         # print tmp_filepaths
         tmp_filepaths = list(set(tmp_filepaths))
@@ -291,16 +499,24 @@ class SSDC():
                 self.del_num += 1
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter, epilog='Mail bug reports and suggestions to <zom3y3@gmail.com>')
-    cluster_types = ['file_ssdeep', 'strings_ssdeep', 'imp_exp_ssdeep']
+    starttime = time.time()
+    epilogs = "EXAMPLES:\n"
+    epilogs += "\tpython ssdc.py /tmp/analysis_samples/ -d -s 0 -e /tmp/exclude_samples/\n"
+    epilogs += "\tpython ssdc.py /tmp/analysis_samples/ -d -t imp_exp_ssdeep -s 30 -e /tmp/exclude_samples/\n"
+    epilogs += "\tpython ssdc.py /tmp/analysis_samples/ -d -t strings_ssdeep -s 30 -e /tmp/exclude_samples/\n"
+    epilogs += "\tpython ssdc.py /tmp/analysis_samples/ -g\n\n"
+    epilogs += "Mail bug reports and suggestions to <zom3y3@gmail.com>\n"
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter, epilog=epilogs)
+    cluster_types = ['file_ssdeep', 'strings_ssdeep', 'imp_exp_ssdeep', 'section_ssdeep', 'code_section_ssdeep', 'rodata_section_ssdeep']
     similar_scores = ['0', '30', '60', '90']
-    parser.add_argument(dest='filepath', metavar='FILEPATH', help='Specific the File Directory')
-    parser.add_argument('-s', '--score', dest='score', metavar='SCORE', choices=similar_scores, help='Specific the similarity score, list of choices: {%(choices)s}', default='60')
-    parser.add_argument('-t', '--type', dest='type', metavar='TYPE', choices=cluster_types, help='Specific the cluster type, list of choices: {%(choices)s}', default='file_ssdeep')
-    parser.add_argument('-g', '--gather', dest='gather', action='store_true', help='Copy the similar files together to a new file directory')
+    parser.add_argument(dest='filepath', help='Specific the File Directory')
+    parser.add_argument('-c', '--copy', dest='copy', action='store_true', help='Copy the similar files together to a new file directory')
     parser.add_argument('-d', '--delete', dest='delete', action='store_true', help='Delete the similar files')
+    parser.add_argument('-g', '--graph', dest='graph', action='store_true', help='Draw Cluster Graph')
     parser.add_argument('-e', '--exclude', dest='exclude', help='Exclude similar files in this file Directory')
     parser.add_argument('-j', '--jsonfile', dest='jsonfile', help='Save cluster json report to this file')
+    parser.add_argument('-s', '--score', dest='score', metavar='SCORE', choices=similar_scores, help='Specific the similarity score, list of choices: {%(choices)s}', default='60')
+    parser.add_argument('-t', '--type', dest='type', metavar='TYPE', choices=cluster_types, help='Specific the cluster type, list of choices: {%(choices)s}', default='file_ssdeep')
 
     args = parser.parse_args()
 
@@ -317,21 +533,27 @@ if __name__ == "__main__":
         cluetr_type = 'file_ssdeep'
 
     if args.exclude:
-        exclude = args.exclude
+        exclude_path = args.exclude
     else:
-        exclude = ''
+        exclude_path = None
 
-    if args.delete and args.gather:
-        print "[+] WARNING: args.delete dosen't work when args.gather is on. "
-    starttime = time.time()
-    print '> Total files num: %d' %(len(os.listdir(analysis_path)))
+    if args.delete and args.copy:
+        print "[+] WARNING: args.delete dosen't work when args.copy is on. "
+
+    filenums = len(os.listdir(analysis_path))
+    if not filenums:
+        print '> No files, Exit.'
+        exit(0)
+    print '> Total files num: %d' %(filenums)
+    scan_json = eset_scan(analysis_path)
     print '> Clustering ...'
-    s = SSDC(analysis_path, score, type=cluetr_type, exclude_files=exclude)
+    s = SSDC(analysis_path, score, type=cluetr_type, exclude_files=exclude_path)
     s.handle()
     cluster_report = s.cluster_report
+    print s.count
     print '> {0} ssdeep hashes cluster into {1} groups'.format(len(s.hashes), len(s.groups))
 
-    if args.gather:
+    if args.copy:
         timestr = str(int(time.time()))
         for cluster in cluster_report['result']:
             for cluster_name, cluster_data in cluster.items():
@@ -347,10 +569,10 @@ if __name__ == "__main__":
 
         print '> Copy the similar files together to %s' %(os.path.join(filedir, '%s_%s/' % (cluster_report['type'], timestr)))
 
-    if args.delete and not args.gather:
+    if args.delete and not args.copy:
         if args.exclude:
             s.delete_exclude()
-        s.delete_similars()
+        s.delete_similars(exclude_path=exclude_path)
         print '> Deleted %d similar files, remaining files num: %d' % (s.del_num, len(os.listdir(analysis_path)))
 
     if args.jsonfile:
@@ -360,5 +582,15 @@ if __name__ == "__main__":
         f.write(json_report)
         f.close()
         print '> Save cluster json report to %s' %(jsonfile)
+    # print s.cluster_report['result']
+    if args.graph and s.cluster_report['result']:
+        username, password = 'gr4ph', 'gr4ph'
+        #cluster graph
+        session = force_directed_graph(s.cluster_report, username, password)
+        if session:
+            print "> Cluster Graph:", "http://%s:%s@192.168.40.156:8081/graph/graph-directed.php?session=%s" %(username, password, session)
+        else:
+            print "> Cluster Graph: Not Available!"
+
     endtime = time.time()
     print '> Time Usage: ' + str(endtime - starttime)
