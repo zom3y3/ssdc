@@ -38,3 +38,6 @@ EXAMPLES:
 
 Mail bug reports and suggestions to <zom3y3@gmail.com>
 ```
+
+# Graph
+![ssdc_graph](./ssdc_graph.png)
